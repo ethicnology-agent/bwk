@@ -1,15 +1,20 @@
-//! Extended private keys a spend draws BIP32 input keys from.
+//! Spend authority handed to an [`Account`](super::Account) for one call.
 //!
-//! A [`KeyRing`] resolves the `(master fingerprint, full path)` origin a PSBT
-//! input carries to a secret key, from master keys or from keys rooted at an
-//! account path (e.g. `m/86'/0'/0'`), so a caller can hold an account key
-//! without holding the master key it was derived from.
+//! An account built from keys (`Config::from_keys` with a public spend key)
+//! scans, derives addresses and simulates spends without holding any spend
+//! authority. To spend, the caller derives the keys itself and lends them for
+//! the duration of a single build or sign call through [`SpendKeys`]; the
+//! account never stores them.
+//!
+//! The keys are scoped on purpose: the SP spend key (`b_spend`) and extended
+//! private keys rooted at an *account* path (e.g. `m/86'/0'/0'`), never the
+//! BIP39 mnemonic, the seed, or the master xpriv.
 
 use std::collections::BTreeMap;
 
 use bitcoin::{
     bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv},
-    secp256k1::{Secp256k1, SecretKey, Signing},
+    secp256k1::{PublicKey, Secp256k1, SecretKey, Signing},
 };
 
 /// An extended private key rooted at `origin_path` under the master key
@@ -114,6 +119,47 @@ impl Drop for KeyRing {
     }
 }
 
+/// The spend authority of an SP account, lent for one call.
+///
+/// `b_spend` is the BIP352 spend secret key; `ring` holds the keys for the
+/// BIP32 (taproot) sub-account inputs. Both are erased (best effort, see
+/// [`SecretKey::non_secure_erase`]) when this value is dropped.
+pub struct SpendKeys {
+    b_spend: SecretKey,
+    ring: KeyRing,
+}
+
+impl SpendKeys {
+    pub fn new(b_spend: SecretKey, ring: KeyRing) -> Self {
+        Self { b_spend, ring }
+    }
+
+    pub fn b_spend(&self) -> SecretKey {
+        self.b_spend
+    }
+
+    pub fn ring(&self) -> &KeyRing {
+        &self.ring
+    }
+
+    /// The public spend key `b_spend` corresponds to.
+    pub fn spend_public_key<C: Signing>(&self, secp: &Secp256k1<C>) -> PublicKey {
+        self.b_spend.public_key(secp)
+    }
+}
+
+impl std::fmt::Debug for SpendKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpendKeys").finish_non_exhaustive()
+    }
+}
+
+impl Drop for SpendKeys {
+    fn drop(&mut self) {
+        self.b_spend.non_secure_erase();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,8 +226,11 @@ mod tests {
     fn debug_output_carries_no_key() {
         let secp = Secp256k1::new();
         let master = master();
-        let ring = KeyRing::from_masters(BTreeMap::from([(master.fingerprint(&secp), master)]));
-        let rendered = format!("{ring:?}");
+        let keys = SpendKeys::new(
+            master.private_key,
+            KeyRing::from_masters(BTreeMap::from([(master.fingerprint(&secp), master)])),
+        );
+        let rendered = format!("{keys:?} {:?}", keys.ring());
         assert!(!rendered.contains(&master.to_string()));
         assert!(!rendered.contains(&master.private_key.display_secret().to_string()));
     }
