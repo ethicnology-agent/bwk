@@ -1158,11 +1158,16 @@ pub fn sign_and_finalize_v2(
 ) -> bitcoin::Transaction {
     write_bip32_sp_shares(account, psbt);
     sign_v2(mnemonic, account.network(), psbt);
+    // `from_bitcoin_psbt` cannot recover PSBT_GLOBAL_TX_MODIFIABLE from a v0
+    // PSBT and resets it, which `serialize` then refuses for a PSBT carrying
+    // silent payment outputs: carry it across the v0 round trip.
+    let tx_modifiable = psbt.tx_modifiable.clone();
     let mut v0 = psbt.clone().into_bitcoin_psbt().unwrap();
     if let Some(signer) = sub_accounts_signer(account) {
         signer.sign(&mut v0);
     }
     *psbt = bwk_psbt::PsbtV2::from_bitcoin_psbt(v0).unwrap();
+    psbt.tx_modifiable = tx_modifiable;
     account.finalize(&psbt.serialize().unwrap()).unwrap()
 }
 
